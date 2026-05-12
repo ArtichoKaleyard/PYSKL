@@ -99,6 +99,7 @@ venv.bak/
 
 # custom
 /data
+checkpoints/
 .vscode
 .idea
 *.pkl
