@@ -1,10 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import mmcv
-from mmcv import digit_version
+
+from .utils.mmcv_compat import digit_version, install_mmcv_legacy_shims
 
 from .version import __version__
 
-mmcv_minimum_version = '1.3.6'
+install_mmcv_legacy_shims()
+
+mmcv_minimum_version = '2.1.0'
 mmcv_maximum_version = '2.1.0'
 mmcv_version = digit_version(mmcv.__version__)
 

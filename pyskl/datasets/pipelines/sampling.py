@@ -177,6 +177,97 @@ class UniformSample(UniformSampleFrames):
 
 
 @PIPELINES.register_module()
+class MotionAwareUniformSampleFrames(UniformSampleFrames):
+    """Uniform sampler that biases training clips toward high-motion windows.
+
+    This keeps the test-time behavior identical to ``UniformSampleFrames`` so
+    score comparison is controlled, while training samples are drawn from the
+    most dynamic temporal region when keypoints are available.
+
+    Args:
+        clip_len (int): Frames of each sampled output clip.
+        num_clips (int): Number of clips to sample.
+        p_interval (float | tuple[float, float]): Temporal crop ratio range.
+        seed (int): Test-time random seed.
+        motion_topk (int): Randomly choose among the top-k motion windows.
+    """
+
+    def __init__(self, clip_len, num_clips=1, p_interval=1, seed=255, motion_topk=3, **kwargs):
+        super().__init__(clip_len, num_clips=num_clips, p_interval=p_interval, seed=seed, **kwargs)
+        self.motion_topk = motion_topk
+
+    @staticmethod
+    def _motion_energy(keypoint):
+        coords = keypoint[..., :2].astype(np.float32)
+        valid = np.abs(coords).sum(axis=(-1, -2)) > 1e-5
+        diff = np.abs(np.diff(coords, axis=1)).sum(axis=(-1, -2))
+        valid_pair = valid[:, 1:] & valid[:, :-1]
+        weighted = diff * valid_pair
+        denom = np.maximum(valid_pair.sum(axis=0), 1)
+        return weighted.sum(axis=0) / denom
+
+    def _select_motion_window(self, keypoint, span):
+        total_frames = keypoint.shape[1]
+        if span >= total_frames:
+            return 0, total_frames
+        energy = self._motion_energy(keypoint)
+        if energy.size == 0 or not np.isfinite(energy).any() or energy.max() <= 0:
+            start = np.random.randint(total_frames - span + 1)
+            return start, start + span
+        if span <= 1:
+            start = int(np.argmax(energy))
+            return start, start + span
+        padded = np.pad(energy, (1, 0), mode='constant')
+        cumsum = np.cumsum(padded)
+        # Motion has length T - 1. A frame window [s, s + span) owns motion
+        # edges [s, s + span - 1).
+        scores = cumsum[span - 1:] - cumsum[:-(span - 1)]
+        if scores.size == 0:
+            return 0, total_frames
+        topk = min(self.motion_topk, scores.size)
+        candidates = np.argsort(scores)[-topk:]
+        start = int(np.random.choice(candidates))
+        return start, start + span
+
+    def _sample_from_window(self, start, end):
+        span = end - start
+        if span < self.clip_len:
+            inner_start = np.random.randint(0, span)
+            inds = np.arange(inner_start, inner_start + self.clip_len)
+            return np.mod(inds, span) + start
+        if self.clip_len <= span < 2 * self.clip_len:
+            basic = np.arange(self.clip_len)
+            extra = np.random.choice(self.clip_len + 1, span - self.clip_len, replace=False)
+            offset = np.zeros(self.clip_len + 1, dtype=np.int64)
+            offset[extra] = 1
+            return basic + np.cumsum(offset)[:-1] + start
+        bids = np.array([i * span // self.clip_len for i in range(self.clip_len + 1)])
+        bsize = np.diff(bids)
+        offset = np.random.randint(bsize)
+        return bids[:self.clip_len] + offset + start
+
+    def __call__(self, results):
+        if results.get('test_mode', False) or 'keypoint' not in results:
+            return super().__call__(results)
+
+        total_frames = results['total_frames']
+        allinds = []
+        for _ in range(self.num_clips):
+            ratio = np.random.rand() * (self.p_interval[1] - self.p_interval[0]) + self.p_interval[0]
+            span = max(1, int(ratio * total_frames))
+            start, end = self._select_motion_window(results['keypoint'], span)
+            allinds.append(self._sample_from_window(start, end))
+
+        inds = np.concatenate(allinds)
+        inds = np.mod(inds, total_frames)
+        results['frame_inds'] = (inds + results['start_index']).astype(int)
+        results['clip_len'] = self.clip_len
+        results['frame_interval'] = None
+        results['num_clips'] = self.num_clips
+        return results
+
+
+@PIPELINES.register_module()
 class UniformSampleDecode:
 
     def __init__(self, clip_len, num_clips=1, p_interval=1, seed=255):
