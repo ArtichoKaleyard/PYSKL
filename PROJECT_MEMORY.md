@@ -29,3 +29,11 @@
 - Action/Command: E1-E4 使用 `tools/modern/test.py --videos-per-gpu 2 --workers-per-gpu 4` 正式评估；E5 复用 A 组 `posec3d_joint.pkl`；`export_sampling_metadata.py` 导出 sampled indices 和 KNS 峰值；`analyze_kns_scores.py` 生成正误迁移和 10-clip 收益重合度。
 - Verification: E1/E2/E3/E4/E5 top1 分别为 0.9358/0.9344/0.9364/0.9369/0.9373；E2 相比 E1 负迁移，E4 相比 E3 小幅提升；每个 score 和 sampling 文件均为 16487 samples。
 - Follow-up: KNS sampler 必须允许短视频粗分区重复补帧；首次 E2 卡住的根因是分区长度小于 3 时 `_fill_points` 寻找不同未占用帧进入死循环。后续继续优化 KNS 时优先分析 E2/E4 的 breaks，再决定是否进入 FineGYM 或 limb/fusion。
+
+## 2026-05-14 - FineGYM 与 KNS-v2 检查
+- Context: 在 NTU60 样本级分析后，按计划只补 FineGYM E1/E3/E4/E5，并实现一个保守 KNS-v2：每个粗分区固定保留 uniform 中心点，剩余位置给速度峰值和加速度峰值。
+- Decision: FineGYM 只使用 PoseC3D joint 官方权重，不跑单视图 KNS；KNS-v2 作为单独 `KnsV2SampleFrames` 和独立配置存在，不覆盖 v1。
+- Why: NTU60 已显示单视图 KNS 不稳；FineGYM 应直接验证 2-clip uniform vs uniform+KNS；v2 只验证轻量保守化是否能减少误伤。
+- Action/Command: 下载 `gym_hrnet.pkl` 和 `slowonly_r50_gym/joint.pth`；运行 FineGYM F1/F3/F4/F5 和 F4-v2；额外运行 NTU60 E2-v2/E4-v2。
+- Verification: FineGYM mean class：F1=0.9291，F3=0.9337，F4-v1=0.9242，F4-v2=0.9203，F5=0.9381；NTU60 E2-v2/E4-v2 top1 为 0.9295/0.9344。
+- Follow-up: 当前证据不支持继续扩大 KNS-v1/v2 到 limb/fusion；若继续，应先做失败样本诊断和门控/峰值质量过滤，而不是增加无约束峰值视图。

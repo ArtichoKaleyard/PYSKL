@@ -27,6 +27,8 @@ The asset script prepares:
 - `checkpoints/posec3d/slowonly_r50_ntu60_xsub/joint.pth`
 - `checkpoints/posec3d/slowonly_r50_ntu60_xsub/limb.pth`
 - `checkpoints/msg3d/msg3d_pyskl_ntu60_xsub_hrnet/j.pth`
+- `data/gym/gym_hrnet.pkl`
+- `checkpoints/posec3d/slowonly_r50_gym/joint.pth`
 
 ## A-D Official-Weight Evaluation
 
@@ -79,3 +81,20 @@ uv run python tools/modern/analyze_kns_scores.py \
 Full E1-E5 commands and decision gates are in `EXPERIMENT_PLAN.md`. The older
 training sampler configs remain available for later stages, but they are not
 part of the first KNS pass.
+
+## FineGYM Follow-Up
+
+FineGYM uses mean class Top-1 as the primary comparison metric.
+
+```bash
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/gym_joint_2clip_uniform.py \
+  --out work_dirs/modern/scores/gym_joint_e3_2clip_uniform.pkl
+
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/gym_joint_uniform_kns.py \
+  --out work_dirs/modern/scores/gym_joint_e4_uniform_kns.pkl
+```
+
+KNS-v2 configs are available for focused checks, but the current recorded
+results do not support expanding v2 into limb/fusion.

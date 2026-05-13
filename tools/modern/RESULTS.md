@@ -142,6 +142,57 @@ joint 略高于官方表格，limb、fusion 和 MS-G3D 略低于官方表格，�
 未覆盖区间中点；分区太短时允许重复帧补齐。这与 PYSKL 原始 uniform sampler
 对短视频使用重复/取模补齐的语义一致。
 
+## 2026-05-14 FineGYM And KNS-v2 Follow-Up
+
+按后续判断，FineGYM 只跑 joint 官方权重的 E1/E3/E4/E5，不再跑单视图 KNS；
+同时补一个轻量 KNS-v2：每个粗分区固定保留 uniform 中心点，剩余两个采样位
+分别给速度峰值和加速度峰值。v2 只新增 sampler 和独立配置，不覆盖 KNS-v1。
+
+### FineGYM Metrics
+
+FineGYM 官方表以 mean class Top-1 为主，因此本节优先看 mean class。
+
+| 组别 | 采样方式 | clip 成本 | top-1 | top-5 | mean class |
+| --- | --- | ---: | ---: | ---: | ---: |
+| F1 | 1-clip uniform | 1x | 0.9514 | 0.9977 | 0.9291 |
+| F3 | 2-clip uniform | 2x | 0.9556 | 0.9974 | 0.9337 |
+| F4 | uniform + KNS-v1 | 2x | 0.9508 | 0.9968 | 0.9242 |
+| F4-v2 | uniform + KNS-v2 | 2x | 0.9486 | 0.9950 | 0.9203 |
+| F5 | 10-clip uniform | 10x | 0.9575 | 0.9977 | 0.9381 |
+
+FineGYM 没有放大 KNS-v1 的价值。F4-v1 比 F3 低 0.95 个 mean-class 百分点，
+F4-v2 又低于 F4-v1，说明当前 KNS 峰值视图在 FineGYM joint 流上是负贡献。
+
+### FineGYM Migration From F1
+
+| 目标组别 | Both Correct | Target Fixes | Target Breaks | Both Wrong |
+| --- | ---: | ---: | ---: | ---: |
+| F3 | 8083 | 60 | 24 | 354 |
+| F4 | 8045 | 57 | 62 | 357 |
+| F4-v2 | 8029 | 54 | 78 | 360 |
+| F5 | 8078 | 81 | 29 | 333 |
+
+以 `F10 = {F1 错, F5 对}` 为 10-clip 有效收益集合，本轮 `|F10| = 81`。
+F3 覆盖其中 52 个，F4-v1 覆盖 37 个，F4-v2 覆盖 29 个。KNS 视图不仅没有
+接近 10-clip 收益，反而低于普通 2-clip uniform。
+
+### KNS-v2 NTU60 Check
+
+| 组别 | 采样方式 | clip 成本 | top-1 | top-5 | mean class |
+| --- | --- | ---: | ---: | ---: | ---: |
+| E2-v2 | 1-clip KNS-v2 | 1x | 0.9295 | 0.9955 | 0.9294 |
+| E4-v2 | uniform + KNS-v2 | 2x | 0.9344 | 0.9962 | 0.9343 |
+
+KNS-v2 的“uniform 中心点 + 速度峰值 + 加速度峰值”没有修复 v1 的稳定性问题：
+NTU60 上 E2-v2 明显低于 E2-v1，E4-v2 也低于 E3 和 E4-v1。这个轻量 v2
+分支暂时不值得继续扩展到 limb/fusion。
+
+### Updated Decision
+
+当前证据不支持继续沿 KNS-v1/v2 直接加数据集或加融合。更合理的下一步是先做
+失败样本诊断：确认峰值是否被局部抖动、动作方向相反样本或短片段重复采样误导。
+若继续设计 v3，应优先考虑门控或置信度/峰值质量过滤，而不是再增加无约束峰值视图。
+
 ## Commands
 
 PoseC3D joint 和 limb 使用 `videos_per_gpu=2, workers_per_gpu=4`。最初的
@@ -209,6 +260,12 @@ uv run python tools/modern/fuse_scores.py \
 | E3 score | `work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.pkl` |
 | E4 score | `work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.pkl` |
 | E analysis | `work_dirs/modern/scores/posec3d_joint_kns_analysis.json` |
+| FineGYM F1 score | `work_dirs/modern/scores/gym_joint_e1_1clip_uniform.pkl` |
+| FineGYM F3 score | `work_dirs/modern/scores/gym_joint_e3_2clip_uniform.pkl` |
+| FineGYM F4 score | `work_dirs/modern/scores/gym_joint_e4_uniform_kns.pkl` |
+| FineGYM F4-v2 score | `work_dirs/modern/scores/gym_joint_e4_uniform_kns_v2.pkl` |
+| FineGYM F5 score | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.pkl` |
+| FineGYM analysis | `work_dirs/modern/scores/gym_joint_kns_analysis.json` |
 
 完整性检查结果：
 
@@ -219,6 +276,11 @@ uv run python tools/modern/fuse_scores.py \
 - `posec3d_joint_e2_1clip_kns.pkl`：16487 samples
 - `posec3d_joint_e3_2clip_uniform.pkl`：16487 samples
 - `posec3d_joint_e4_uniform_kns.pkl`：16487 samples
+- `gym_joint_e1_1clip_uniform.pkl`：8521 samples
+- `gym_joint_e3_2clip_uniform.pkl`：8521 samples
+- `gym_joint_e4_uniform_kns.pkl`：8521 samples
+- `gym_joint_e4_uniform_kns_v2.pkl`：8521 samples
+- `gym_joint_e5_10clip_uniform.pkl`：8521 samples
 
 ## Notes
 

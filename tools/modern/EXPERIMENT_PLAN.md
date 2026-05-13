@@ -244,6 +244,6 @@ KNS Breaks 明显多于 KNS Fixes
 ## Decision Gates
 
 1. E1-E5 跑完后，先看成本-精度表和正误迁移表。
-2. 只有当 E2/E4 至少显示同成本或互补收益时，才进入 FineGYM 的 F1-F5。
-3. 只有当 E 或 F 证明 KNS 有价值时，才补 limb / fusion 的 G 组。
-4. 只有 test-time 结果站稳后，再考虑训练阶段采样配置。
+2. NTU60 E4 只有轻微互补收益，因此 FineGYM 只补 F1/F3/F4/F5，不再跑单视图 KNS。
+3. FineGYM F4-v1/F4-v2 均低于 F3，KNS-v2 在 NTU60 上也低于 v1；当前不进入 limb / fusion 的 G 组。
+4. 后续若继续，不应直接扩大实验量，应先做失败样本诊断和门控/峰值质量过滤设计。

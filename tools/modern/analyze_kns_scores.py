@@ -95,7 +95,7 @@ def subset_summary(mask: np.ndarray, records: list[dict[str, Any]]) -> dict[str,
     confidences = []
     for record in selected:
         for meta in record.get("kns_meta", []):
-            if isinstance(meta, dict) and meta.get("sampler") == "KNS-v1":
+            if isinstance(meta, dict) and str(meta.get("sampler", "")).startswith("KNS-"):
                 confidences.append(float(meta.get("mean_confidence", 0.0)))
     lengths = [int(record["total_frames"]) for record in selected]
     return dict(

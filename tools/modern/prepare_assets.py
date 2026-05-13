@@ -1,4 +1,4 @@
-"""Prepare and verify assets for the NTU60 xsub modern experiments."""
+"""Prepare and verify assets for the modern PYSKL experiments."""
 
 from __future__ import annotations
 
@@ -39,6 +39,16 @@ ASSETS = [
         name="msg3d_hrnet_joint",
         url="http://download.openmmlab.com/mmaction/pyskl/ckpt/msg3d/msg3d_pyskl_ntu60_xsub_hrnet/j.pth",
         path=Path("checkpoints/msg3d/msg3d_pyskl_ntu60_xsub_hrnet/j.pth"),
+    ),
+    Asset(
+        name="gym_hrnet",
+        url="https://download.openmmlab.com/mmaction/pyskl/data/gym/gym_hrnet.pkl",
+        path=Path("data/gym/gym_hrnet.pkl"),
+    ),
+    Asset(
+        name="posec3d_gym_joint",
+        url="http://download.openmmlab.com/mmaction/pyskl/ckpt/posec3d/slowonly_r50_gym/joint.pth",
+        path=Path("checkpoints/posec3d/slowonly_r50_gym/joint.pth"),
     ),
 ]
 

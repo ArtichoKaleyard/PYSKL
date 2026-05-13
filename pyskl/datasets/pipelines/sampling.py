@@ -448,6 +448,34 @@ class KnsSampleFrames(UniformSampleFrames):
 
 
 @PIPELINES.register_module()
+class KnsV2SampleFrames(KnsSampleFrames):
+    """Conservative KNS sampler that keeps a uniform anchor per partition.
+
+    KNS-v2 keeps the same full-video velocity and acceleration signals as
+    ``KnsSampleFrames`` but does not let peaks fully rewrite each coarse
+    partition.  Every partition first keeps the deterministic uniform center,
+    then uses the remaining two slots for velocity and acceleration peaks.  If
+    these points collapse to the same frame in short or flat segments, repeated
+    frames are allowed, matching the short-video behavior of uniform sampling.
+    """
+
+    def _partition_points(self, start, end, velocity, acceleration):
+        """Select center, velocity peak and acceleration peak."""
+
+        center = self._midpoint(start, end)
+        tv = self._segment_peak(velocity, start, end)
+        ta = self._segment_peak(acceleration, start, end)
+        return sorted([center, tv, ta]), tv, ta
+
+    def _get_kns_clip(self, keypoint, keypoint_score=None):
+        """Build one KNS-v2 clip and mark diagnostics accordingly."""
+
+        inds, meta = super()._get_kns_clip(keypoint, keypoint_score)
+        meta['sampler'] = 'KNS-v2'
+        return inds, meta
+
+
+@PIPELINES.register_module()
 class MotionAwareUniformSampleFrames(UniformSampleFrames):
     """Uniform sampler that biases training clips toward high-motion windows.
 
