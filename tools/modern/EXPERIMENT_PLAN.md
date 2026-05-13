@@ -1,30 +1,32 @@
-# NTU60 xsub Modern Branch Experiment Plan
+# NTU60 xsub KNS Test-Time Experiment Plan
 
-本文档记录 `modern` 分支上的暂定实验计划。当前目标不是完整重构
-PYSKL，而是在 Python 3.11、CUDA 12.8、PyTorch 2.7 和 OpenMMLab
-2.x 依赖下，先打通 NTU60 xsub 的关键验证、对照和采样实验链路。
+本文档记录 `modern` 分支当前第一轮 KNS 实验计划。执行口径以
+`EXPERIMENT_PLAN_KNS.md` 为准：先证明 **KNS-v1：速度-加速度分区关键邻域采样**
+在 test-time sampling 上是否有信息价值，再考虑训练、FineGYM 或融合扩展。
 
-计划仍可能随实验结果调整。本文档优先作为当前分支的执行清单和对照依据，
-不替代正式实验报告。
+当前分支已经完成 A-D 官方权重校准；剩余优先级是实现并跑完 E1-E5，然后做
+样本级正误迁移分析。
 
 ## Scope
 
-本轮迁移聚焦以下内容：
+本轮只做 test-time sampling：
 
-- 使用 OpenMMLab 官方提供的 `ntu60_hrnet.pkl` 作为 NTU60 HRNet 2D
-  pose annotation。
-- 使用 PoseC3D joint、PoseC3D limb 和 MS-G3D HRNet 2D 官方权重验证
-  现代环境下的测试流程。
-- 保留 PoseC3D joint+limb 分数融合作为核心复现目标。
-- 围绕 PoseC3D joint 的原始采样和自定义采样做训练对比。
-- 仅在需要最终融合或采样结论更完整时，再展开 limb 自定义采样训练。
+- 不训练模型。
+- 不改 PoseC3D backbone。
+- 不改 heatmap 生成逻辑。
+- 不改官方 checkpoint。
+- 第一轮只使用 NTU60 XSub 的 PoseC3D joint 官方权重。
+
+官方 PoseC3D test pipeline 中的 `GeneratePoseTarget(double=True)` 保持不变，
+因此 E 组只改变 `PoseDecode` 之前的 temporal sampler。这里的 `clip 成本`
+按 temporal clip 数计，和官方 README 中的 10-clip 测试口径对齐。
 
 暂不处理以下内容：
 
-- 全项目 OpenMMLab 1.x 到 2.x 的系统性重构。
-- RGBPose、demo、notebook、旧版分布式入口和所有历史配置的全面兼容。
-- NTU60 原始 RGB 视频或原始骨架文件的重新预处理。
-- 多机训练、完整超参搜索和大规模采样策略网格搜索。
+- 训练阶段采样对照。
+- FineGYM / NTU120 扩展。
+- limb / joint+limb 的 KNS 融合补充。
+- KNS 门控、关节加权、超参搜索和复杂可视化报告。
 
 ## Assets
 
@@ -35,34 +37,84 @@ uv run python tools/modern/prepare_assets.py --check
 uv run python tools/modern/prepare_assets.py --download
 ```
 
-当前计划依赖的官方资源如下：
+当前 E 组依赖：
 
-| 名称                            | 本地路径                                                    | 用途          |
-|-------------------------------|---------------------------------------------------------|-------------|
-| NTU60 HRNet annotation        | `data/nturgbd/ntu60_hrnet.pkl`                          | A-G 的统一数据入口 |
-| PoseC3D joint checkpoint      | `checkpoints/posec3d/slowonly_r50_ntu60_xsub/joint.pth` | A、C 的官方权重   |
-| PoseC3D limb checkpoint       | `checkpoints/posec3d/slowonly_r50_ntu60_xsub/limb.pth`  | B、C 的官方权重   |
-| MS-G3D HRNet joint checkpoint | `checkpoints/msg3d/msg3d_pyskl_ntu60_xsub_hrnet/j.pth`  | D 的官方权重     |
+| 名称 | 本地路径 | 用途 |
+| --- | --- | --- |
+| NTU60 HRNet annotation | `data/nturgbd/ntu60_hrnet.pkl` | `xsub_val` 数据入口 |
+| PoseC3D joint checkpoint | `checkpoints/posec3d/slowonly_r50_ntu60_xsub/joint.pth` | E1-E5 统一权重 |
 
-`data/` 和 `checkpoints/` 都是本地大文件目录，不进入 git。
+`data/`、`checkpoints/` 和 `work_dirs/` 都是本地大文件或实验产物目录，不进入
+git。
 
-## Experiment Matrix
+## Completed Calibration
 
-| 组别 | 模型                    |        是否训练 | 配置 / 入口                                                        | 作用                         |
-|----|-----------------------|------------:|----------------------------------------------------------------|----------------------------|
-| A  | PoseC3D joint 官方权重    |           否 | `configs/modern/posec3d/ntu60_xsub_joint.py`                   | 验证 PoseC3D joint 测试流程      |
-| B  | PoseC3D limb 官方权重     |           否 | `configs/modern/posec3d/ntu60_xsub_limb.py`                    | 验证 limb 流和 limb heatmap 配置 |
-| C  | PoseC3D joint+limb 融合 | 否 / 可复现分数融合 | `tools/modern/fuse_scores.py`                                  | 复现核心融合精度                   |
-| D  | MS-G3D HRNet 2D 官方权重  |           否 | `configs/modern/msg3d/ntu60_xsub_hrnet_joint.py`               | 提供 GCN 对照锚点                |
-| E  | PoseC3D joint 原始采样    |           是 | `configs/modern/posec3d/ntu60_xsub_joint_original_sampling.py` | 采样实验 baseline              |
-| F  | PoseC3D joint 自定义采样   |           是 | `configs/modern/posec3d/ntu60_xsub_joint_custom_sampling.py`   | 检查采样策略是否有效                 |
-| G  | PoseC3D limb 自定义采样    |          可选 | `configs/modern/posec3d/ntu60_xsub_limb_custom_sampling.py`    | 仅在需要最终融合时再跑                |
+A-D 已作为可信参照完成，结果整理在 `tools/modern/RESULTS.md`：
 
-## Execution Order
+| 组别 | 模型 | 权重 | 采样 | top-1 | 作用 |
+| --- | --- | --- | --- | ---: | --- |
+| A | PoseC3D joint | 官方 | 10-clip uniform | 0.9373 | joint 校准 |
+| B | PoseC3D limb | 官方 | 10-clip uniform | 0.9338 | limb 校准 |
+| C | PoseC3D joint+limb | 官方 score fusion | 10-clip uniform | 0.9406 | 融合参照 |
+| D | MS-G3D HRNet joint | 官方 | 10-clip uniform | 0.9264 | GCN 对照 |
 
-### Stage 0: Environment And Assets
+这些结果只负责建立可信运行栈，不直接参与 KNS 结论。
 
-先确认现代环境和官方资产：
+## E Group: NTU60 XSub Joint Test-Time Sampling
+
+统一控制项：
+
+| 项 | 设定 |
+| --- | --- |
+| 模型 | PoseC3D SlowOnly-R50 joint |
+| 权重 | 官方 checkpoint |
+| 数据 | NTU60 XSub HRNet 2D Pose |
+| split | `xsub_val` |
+| backbone | 不改 |
+| heatmap | 不改，保持官方 test-time `double=True` |
+| 训练 | 不训练 |
+| 输出 | score、metrics、sampled indices、KNS 峰值元数据、正误迁移分析 |
+
+实验矩阵：
+
+| 编号 | 采样方式 | clip 成本 | 配置 |
+| --- | --- | ---: | --- |
+| E1 | 1-clip uniform | 1x | `configs/modern/posec3d/ntu60_xsub_joint_1clip_uniform.py` |
+| E2 | 1-clip KNS-v1 | 1x | `configs/modern/posec3d/ntu60_xsub_joint_1clip_kns.py` |
+| E3 | 2-clip uniform | 2x | `configs/modern/posec3d/ntu60_xsub_joint_2clip_uniform.py` |
+| E4 | uniform + KNS-v1 | 2x | `configs/modern/posec3d/ntu60_xsub_joint_uniform_kns.py` |
+| E5 | 10-clip uniform | 10x | `configs/modern/posec3d/ntu60_xsub_joint_10clip_uniform.py` |
+
+关键比较：
+
+```text
+E2 vs E1：同为 1-clip，KNS 是否比 uniform 更有效
+E4 vs E3：同为 2-clip，KNS 是否提供互补信息
+E4 vs E5：2-clip 能否接近 10-clip
+```
+
+## KNS-v1 Implementation Contract
+
+KNS-v1 采样器为 `pyskl.datasets.pipelines.KnsSampleFrames`，只接入 test
+pipeline。
+
+固定口径：
+
+- `clip_len=48`。
+- 每个粗分区取 `r=3` 帧，因此分区数为 `B=16`。
+- 每个分区内分别计算速度峰值 `tv` 和加速度峰值 `ta`。
+- `v`、`a` 先按整段视频做 P5/P95 robust normalization。
+- 归一化后乘姿态置信度可靠性，并做短窗口时间平滑。
+- 若 `|tv - ta| <= 2`，合并为一个关键事件簇。
+- 剩余采样位从未覆盖片段中按长度降序取中点补齐。
+- 每个 clip 内 frame indices 按时间排序。
+
+`uniform + KNS-v1` 使用一个 uniform clip 加一个 KNS clip，模型仍通过
+PoseC3D 原有 `average_clips='prob'` 做 clip 平均。
+
+## Commands
+
+环境与资产检查：
 
 ```bash
 uv sync --group dev
@@ -70,116 +122,128 @@ uv run python scripts/check_env.py
 uv run python tools/modern/prepare_assets.py --check
 ```
 
-通过标准：
-
-- Python 为 3.11。
-- PyTorch 为 2.7.x，CUDA runtime 为 12.8。
-- GPU 可见，`mmcv.ops` 可用。
-- 四个官方资产均显示 `[OK]`。
-
-### Stage 1: Official-Weight Evaluation
-
-先跑不训练的 A、B、D，确认数据、模型、checkpoint 和 score export 全链路：
+E1-E4 正式评估命令：
 
 ```bash
 uv run python tools/modern/test.py \
-  configs/modern/posec3d/ntu60_xsub_joint.py \
-  --out work_dirs/modern/scores/posec3d_joint.pkl
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.pkl \
+  --partial-out work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.partial.pkl \
+  --partial-interval 100 \
+  --progress-interval 60 \
+  --videos-per-gpu 2 \
+  --workers-per-gpu 4
 
 uv run python tools/modern/test.py \
-  configs/modern/posec3d/ntu60_xsub_limb.py \
-  --out work_dirs/modern/scores/posec3d_limb.pkl
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_kns.py \
+  --out work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.pkl \
+  --partial-out work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.partial.pkl \
+  --partial-interval 100 \
+  --progress-interval 60 \
+  --videos-per-gpu 2 \
+  --workers-per-gpu 4
 
 uv run python tools/modern/test.py \
-  configs/modern/msg3d/ntu60_xsub_hrnet_joint.py \
-  --out work_dirs/modern/scores/msg3d_hrnet_joint.pkl \
-  --eval top_k_accuracy
+  configs/modern/posec3d/ntu60_xsub_joint_2clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.pkl \
+  --partial-out work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.partial.pkl \
+  --partial-interval 100 \
+  --progress-interval 60 \
+  --videos-per-gpu 2 \
+  --workers-per-gpu 4
+
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/ntu60_xsub_joint_uniform_kns.py \
+  --out work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.pkl \
+  --partial-out work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.partial.pkl \
+  --partial-interval 100 \
+  --progress-interval 60 \
+  --videos-per-gpu 2 \
+  --workers-per-gpu 4
 ```
 
-通过标准：
+E5 可直接复用 A 组 `work_dirs/modern/scores/posec3d_joint.pkl`；如需按 E 组命名
+重跑，则使用 `ntu60_xsub_joint_10clip_uniform.py`。
 
-- 三个入口都能完整跑完 `xsub_val`。
-- 产物写入 `work_dirs/modern/scores/`。
-- top-1 / top-5 指标处于合理区间；若明显偏离官方 README，优先排查
-  pipeline、checkpoint key 和数据 split。
-
-### Stage 2: PoseC3D Score Fusion
-
-在 A、B 的 score 产物基础上跑 C：
+采样元数据导出：
 
 ```bash
-uv run python tools/modern/fuse_scores.py \
-  --scores work_dirs/modern/scores/posec3d_joint.pkl work_dirs/modern/scores/posec3d_limb.pkl \
-  --ann-file data/nturgbd/ntu60_hrnet.pkl \
-  --split xsub_val \
-  --out work_dirs/modern/scores/posec3d_joint_limb_fusion.json
+uv run python tools/modern/export_sampling_metadata.py \
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.sampling.pkl
+
+uv run python tools/modern/export_sampling_metadata.py \
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_kns.py \
+  --out work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.sampling.pkl
+
+uv run python tools/modern/export_sampling_metadata.py \
+  configs/modern/posec3d/ntu60_xsub_joint_2clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.sampling.pkl
+
+uv run python tools/modern/export_sampling_metadata.py \
+  configs/modern/posec3d/ntu60_xsub_joint_uniform_kns.py \
+  --out work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.sampling.pkl
+
+uv run python tools/modern/export_sampling_metadata.py \
+  configs/modern/posec3d/ntu60_xsub_joint_10clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.sampling.pkl
 ```
 
-通过标准：
-
-- 输出 joint、limb 融合后的 top-1 / top-5 / mean class accuracy。
-- 至少保留默认等权融合结果；如后续需要，可追加不同权重组合。
-
-### Stage 3: Sampling Training Baseline
-
-先跑 E，再跑 F。短跑验证可加 `--max-epochs 1`，正式训练不加该参数：
+正误迁移分析：
 
 ```bash
-uv run python tools/modern/train.py \
-  configs/modern/posec3d/ntu60_xsub_joint_original_sampling.py \
-  --validate
-
-uv run python tools/modern/train.py \
-  configs/modern/posec3d/ntu60_xsub_joint_custom_sampling.py \
-  --validate
+uv run python tools/modern/analyze_kns_scores.py \
+  --score E1=work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.pkl \
+  --score E2=work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.pkl \
+  --score E3=work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.pkl \
+  --score E4=work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.pkl \
+  --score E5=work_dirs/modern/scores/posec3d_joint.pkl \
+  --metadata E1=work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.sampling.pkl \
+  --metadata E2=work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.sampling.pkl \
+  --metadata E3=work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.sampling.pkl \
+  --metadata E4=work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.sampling.pkl \
+  --metadata E5=work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.sampling.pkl \
+  --out work_dirs/modern/scores/posec3d_joint_kns_analysis.json
 ```
 
-对比重点：
+## Success Criteria
 
-- E 和 F 使用同一数据、模型骨架、epoch 设置和评估口径。
-- F 只改变采样策略，避免同时引入其他增强或训练策略差异。
-- 每轮验证 score 和 checkpoint 写入各自的 `work_dirs/modern/posec3d/`
-  子目录。
+强成功：
 
-### Stage 4: Optional Limb Sampling
-
-只有当以下条件之一成立时，再跑 G：
-
-- F 相比 E 有稳定收益，需要验证 joint+limb 采样融合是否继续有效。
-- 正式实验报告需要完整的 limb 自定义采样对照。
-- A/B/C 复现结果显示 limb 流对最终结论影响较大。
-
-命令：
-
-```bash
-uv run python tools/modern/train.py \
-  configs/modern/posec3d/ntu60_xsub_limb_custom_sampling.py \
-  --validate
+```text
+E2 > E1
+E4 > E3
+E4 接近 E5
 ```
 
-## Outputs
+中等成功：
 
-建议保留以下产物路径：
+```text
+E2 ~= E1
+E4 > E3
+E4 接近 E5
+```
 
-| 类型            | 路径                                                  |
-|---------------|-----------------------------------------------------|
-| 官方权重 score    | `work_dirs/modern/scores/*.pkl`                     |
-| 融合指标          | `work_dirs/modern/scores/*fusion*.json`             |
-| 训练 checkpoint | `work_dirs/modern/posec3d/*/*.pth`                  |
-| 训练验证 score    | `work_dirs/modern/posec3d/*/val_scores_epoch_*.pkl` |
-| 后续实验报告        | `work_dirs/modern/reports/` 或单独新增报告文档               |
+弱成功但仍可分析：
 
-`work_dirs/` 默认视为本地实验产物，不进入 git。需要长期保留的数值结果应
-整理进后续报告文档，而不是依赖本地产物目录。
+```text
+总体精度收益小，但 KNS Fixes 明显集中在高运动、细粒度或长视频样本。
+```
 
-## Current Decision Gates
+失败：
 
-继续推进前优先检查以下节点：
+```text
+E2 < E1
+E4 < E3
+KNS Breaks 明显多于 KNS Fixes
+```
 
-1. A/B/D 是否能完整复现官方权重测试流程。
-2. C 的融合指标是否能作为后续实验可信基线。
-3. E/F 是否能在同等训练条件下比较采样策略。
-4. 是否有必要跑 G；如果 joint 自定义采样没有收益，G 默认后置。
+若失败，优先检查极值点是否被 pose 抖动误导、置信度可靠性是否太弱、粗分区
+是否过细或 `tv/ta` 合并阈值是否不合适。
 
-如果 A-D 任一官方权重验证失败，先修测试链路，不进入训练阶段。如果 E/F
-训练成本明显高于预期，先用短跑和较小验证频率定位问题，再决定是否正式跑满。
+## Decision Gates
+
+1. E1-E5 跑完后，先看成本-精度表和正误迁移表。
+2. 只有当 E2/E4 至少显示同成本或互补收益时，才进入 FineGYM 的 F1-F5。
+3. 只有当 E 或 F 证明 KNS 有价值时，才补 limb / fusion 的 G 组。
+4. 只有 test-time 结果站稳后，再考虑训练阶段采样配置。

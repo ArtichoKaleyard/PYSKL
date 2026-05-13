@@ -51,21 +51,31 @@ uv run python tools/modern/test.py \
   --eval top_k_accuracy
 ```
 
-## E-G Training
+## E Group KNS Test-Time Sampling
 
 ```bash
-uv run python tools/modern/train.py \
-  configs/modern/posec3d/ntu60_xsub_joint_original_sampling.py \
-  --validate
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.pkl
 
-uv run python tools/modern/train.py \
-  configs/modern/posec3d/ntu60_xsub_joint_custom_sampling.py \
-  --validate
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_kns.py \
+  --out work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.pkl
 
-uv run python tools/modern/train.py \
-  configs/modern/posec3d/ntu60_xsub_limb_custom_sampling.py \
-  --validate
+uv run python tools/modern/export_sampling_metadata.py \
+  configs/modern/posec3d/ntu60_xsub_joint_1clip_kns.py \
+  --out work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.sampling.pkl
+
+uv run python tools/modern/analyze_kns_scores.py \
+  --score E1=work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.pkl \
+  --score E2=work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.pkl \
+  --score E5=work_dirs/modern/scores/posec3d_joint.pkl \
+  --metadata E1=work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.sampling.pkl \
+  --metadata E2=work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.sampling.pkl \
+  --metadata E5=work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.sampling.pkl \
+  --out work_dirs/modern/scores/posec3d_joint_kns_analysis.json
 ```
 
-Use `--max-epochs 1` for a short smoke run, and omit it for the configured
-training schedule.
+Full E1-E5 commands and decision gates are in `EXPERIMENT_PLAN.md`. The older
+training sampler configs remain available for later stages, but they are not
+part of the first KNS pass.

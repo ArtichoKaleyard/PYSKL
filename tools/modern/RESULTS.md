@@ -81,6 +81,67 @@ joint 略高于官方表格，limb、fusion 和 MS-G3D 略低于官方表格，�
 因此本轮结果可视为在相同模型、相同数据、相同测试 pipeline 和相同官方权重下的
 现代运行栈复测；batch size 和 worker 数的调整是吞吐优化，不改变测试口径。
 
+## 2026-05-14 KNS-v1 Test-Time Sampling
+
+本轮按 `tools/modern/EXPERIMENT_PLAN.md` 将 E 组收缩为 test-time sampling：
+不训练、不改 PoseC3D backbone、不改 heatmap 生成逻辑，只替换 `PoseDecode`
+之前的 temporal sampler。E5 复用 A 组已完成的 10-clip uniform joint score。
+
+统一设置：
+
+- 模型：PoseC3D SlowOnly-R50 joint。
+- 权重：`checkpoints/posec3d/slowonly_r50_ntu60_xsub/joint.pth`。
+- 数据：`data/nturgbd/ntu60_hrnet.pkl`。
+- split：`xsub_val`，16487 samples。
+- test-time heatmap：保持官方 `GeneratePoseTarget(double=True)`。
+
+### Metrics
+
+| 组别 | 采样方式 | clip 成本 | top-1 | top-5 | mean class |
+| --- | --- | ---: | ---: | ---: | ---: |
+| E1 | 1-clip uniform | 1x | 0.9358 | 0.9964 | 0.9357 |
+| E2 | 1-clip KNS-v1 | 1x | 0.9344 | 0.9959 | 0.9343 |
+| E3 | 2-clip uniform | 2x | 0.9364 | 0.9963 | 0.9363 |
+| E4 | uniform + KNS-v1 | 2x | 0.9369 | 0.9960 | 0.9367 |
+| E5 | 10-clip uniform | 10x | 0.9373 | 0.9964 | 0.9372 |
+
+### Migration From E1
+
+| 目标组别 | Both Correct | Target Fixes | Target Breaks | Both Wrong |
+| --- | ---: | ---: | ---: | ---: |
+| E2 | 15261 | 145 | 168 | 913 |
+| E3 | 15359 | 79 | 70 | 979 |
+| E4 | 15362 | 84 | 67 | 974 |
+| E5 | 15339 | 115 | 90 | 943 |
+
+### 10-Clip Gain Overlap
+
+以 `F10 = {E1 错, E5 对}` 为 10-clip 有效收益集合，本轮 `|F10| = 115`。
+
+| 目标组别 | target fixes | shared with E5 | E5 gain coverage |
+| --- | ---: | ---: | ---: |
+| E2 | 145 | 71 | 0.6174 |
+| E3 | 79 | 66 | 0.5739 |
+| E4 | 84 | 53 | 0.4609 |
+
+### KNS Interpretation
+
+当前结果不支持“单独 1-clip KNS 优于 1-clip uniform”：E2 比 E1 低约
+0.14 个百分点，且 E2 的 Target Breaks 多于 Target Fixes。E4 比同成本 E3 高约
+0.05 个百分点，说明 KNS 作为第二视图有轻微互补收益；但 E4 仍比 10-clip E5 低约
+0.05 个百分点。
+
+按计划中的成功标准，本轮更接近“中等成功”的下沿：KNS 单独不足以替代 uniform，
+但与 uniform 组合后略优于 2-clip uniform。后续若继续推进，应优先分析 E2/E4
+的 breaks，重点检查 pose 抖动、低置信度样本和短视频分区重复采样是否误导峰值。
+
+### Implementation Note
+
+第一次 E2 正式运行在短视频样本处卡住；原因是 KNS 的分区补点逻辑要求每个分区
+补齐 3 个不同帧，但当分区长度小于 3 时没有足够未占用位置。已修正为：优先使用
+未覆盖区间中点；分区太短时允许重复帧补齐。这与 PYSKL 原始 uniform sampler
+对短视频使用重复/取模补齐的语义一致。
+
 ## Commands
 
 PoseC3D joint 和 limb 使用 `videos_per_gpu=2, workers_per_gpu=4`。最初的
@@ -143,15 +204,25 @@ uv run python tools/modern/fuse_scores.py \
 | D score | `work_dirs/modern/scores/msg3d_hrnet_joint.pkl` |
 | D metrics | `work_dirs/modern/scores/msg3d_hrnet_joint.metrics.json` |
 | C fusion | `work_dirs/modern/scores/posec3d_joint_limb_fusion.json` |
+| E1 score | `work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.pkl` |
+| E2 score | `work_dirs/modern/scores/posec3d_joint_e2_1clip_kns.pkl` |
+| E3 score | `work_dirs/modern/scores/posec3d_joint_e3_2clip_uniform.pkl` |
+| E4 score | `work_dirs/modern/scores/posec3d_joint_e4_uniform_kns.pkl` |
+| E analysis | `work_dirs/modern/scores/posec3d_joint_kns_analysis.json` |
 
 完整性检查结果：
 
 - `posec3d_joint.pkl`：16487 samples
 - `posec3d_limb.pkl`：16487 samples
 - `msg3d_hrnet_joint.pkl`：16487 samples
+- `posec3d_joint_e1_1clip_uniform.pkl`：16487 samples
+- `posec3d_joint_e2_1clip_kns.pkl`：16487 samples
+- `posec3d_joint_e3_2clip_uniform.pkl`：16487 samples
+- `posec3d_joint_e4_uniform_kns.pkl`：16487 samples
 
 ## Notes
 
 - partial score 文件只用于长任务进度检查，最终指标以非 partial 的 score 和
   metrics 文件为准。
-- 本轮只验证官方权重测试和 PoseC3D 分数融合；E/F/G 训练实验尚未开始。
+- 本轮只验证官方权重测试、PoseC3D 分数融合和 E 组 test-time sampling；
+  F/G 与训练阶段采样实验尚未开始。

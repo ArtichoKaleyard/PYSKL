@@ -21,3 +21,11 @@
 - Action/Command: A/B 使用 `tools/modern/test.py --videos-per-gpu 2 --workers-per-gpu 4`；D 使用 `--videos-per-gpu 4 --workers-per-gpu 0`；C 使用 `tools/modern/fuse_scores.py` 计算 joint+limb 融合。
 - Verification: A top1=0.9373，B top1=0.9338，C 1:1 top1=0.9406，D top1=0.9264；三个 score 文件均为 16487 samples；与官方 top-1 差异均小于 0.1 个百分点。
 - Follow-up: 进入 E/F 训练时不要默认沿用测试阶段 batch；先用 `--max-epochs 1` 和验证导出做短跑，确认显存、吞吐和 checkpoint/score 写入路径。
+
+## 2026-05-14 - KNS-v1 test-time sampling 边界与结果
+- Context: 根据 `tools/modern/EXPERIMENT_PLAN_KNS.md` 将 E 组从训练采样改为 test-time sampling，使用 PoseC3D joint 官方权重比较 1-clip uniform、1-clip KNS、2-clip uniform、uniform+KNS 和 10-clip uniform。
+- Decision: 新增 `KnsSampleFrames` 只替换 `PoseDecode` 前的 temporal sampler；官方 test-time `GeneratePoseTarget(double=True)`、backbone 和 checkpoint 保持不变。
+- Why: 这一轮要先验证采样策略本身是否有信息价值，避免训练、limb、fusion 或 heatmap 改动搅混结论。
+- Action/Command: E1-E4 使用 `tools/modern/test.py --videos-per-gpu 2 --workers-per-gpu 4` 正式评估；E5 复用 A 组 `posec3d_joint.pkl`；`export_sampling_metadata.py` 导出 sampled indices 和 KNS 峰值；`analyze_kns_scores.py` 生成正误迁移和 10-clip 收益重合度。
+- Verification: E1/E2/E3/E4/E5 top1 分别为 0.9358/0.9344/0.9364/0.9369/0.9373；E2 相比 E1 负迁移，E4 相比 E3 小幅提升；每个 score 和 sampling 文件均为 16487 samples。
+- Follow-up: KNS sampler 必须允许短视频粗分区重复补帧；首次 E2 卡住的根因是分区长度小于 3 时 `_fill_points` 寻找不同未占用帧进入死循环。后续继续优化 KNS 时优先分析 E2/E4 的 breaks，再决定是否进入 FineGYM 或 limb/fusion。

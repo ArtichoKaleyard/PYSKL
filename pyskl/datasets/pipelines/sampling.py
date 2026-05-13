@@ -177,6 +177,277 @@ class UniformSample(UniformSampleFrames):
 
 
 @PIPELINES.register_module()
+class KnsSampleFrames(UniformSampleFrames):
+    """Key-neighborhood sampler for test-time pose clips.
+
+    The sampler keeps the PoseC3D backbone and heatmap generation unchanged.
+    It only replaces the temporal indices selected before ``PoseDecode``.  Each
+    clip is split into coarse partitions; every partition keeps the strongest
+    velocity and acceleration events, merges close events, and fills the
+    remaining slot from the longest uncovered interval.
+
+    Args:
+        clip_len (int): Frames of each sampled output clip.
+        num_clips (int): Number of KNS clips to sample.
+        p_interval (float | tuple[float, float]): Temporal crop ratio range.
+            The first KNS version is intended for full-video test-time use, so
+            the default is ``1``.
+        seed (int): Test-time random seed used by optional uniform companion
+            clips.
+        frames_per_partition (int): Number of sampled frames per partition.
+            KNS-v1 uses velocity, acceleration and one fill point, so this
+            defaults to ``3``.
+        merge_threshold (int): Maximum temporal distance for merging velocity
+            and acceleration peaks into one event.
+        uniform_clips (int): Optional number of leading uniform clips.  This is
+            used for the ``uniform + KNS`` low-cost ensemble.
+        smooth_kernel (int): Temporal moving-average width applied after
+            confidence weighting.
+        eps (float): Small value for robust normalization.
+    """
+
+    def __init__(
+            self,
+            clip_len,
+            num_clips=1,
+            p_interval=1,
+            seed=255,
+            frames_per_partition=3,
+            merge_threshold=2,
+            uniform_clips=0,
+            smooth_kernel=3,
+            eps=1e-6,
+            **kwargs):
+        super().__init__(clip_len, num_clips=num_clips, p_interval=p_interval, seed=seed, **kwargs)
+        if clip_len % frames_per_partition != 0:
+            raise ValueError('clip_len must be divisible by frames_per_partition.')
+        if frames_per_partition != 3:
+            raise ValueError('KNS-v1 expects exactly three frames per partition.')
+        self.frames_per_partition = frames_per_partition
+        self.merge_threshold = merge_threshold
+        self.uniform_clips = uniform_clips
+        self.smooth_kernel = smooth_kernel
+        self.eps = eps
+
+    @staticmethod
+    def _midpoint(start, end):
+        """Return the integer midpoint of a half-open interval."""
+
+        if end <= start:
+            return start
+        return (start + end - 1) // 2
+
+    def _robust_normalize(self, values):
+        """Normalize a temporal signal with P5/P95 clipping."""
+
+        values = values.astype(np.float32)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return np.zeros_like(values, dtype=np.float32)
+        lo, hi = np.percentile(finite, [5, 95])
+        scale = hi - lo
+        if scale <= self.eps:
+            return np.zeros_like(values, dtype=np.float32)
+        return np.clip((values - lo) / (scale + self.eps), 0, 1).astype(np.float32)
+
+    def _smooth(self, values):
+        """Apply a short moving average without changing signal length."""
+
+        if self.smooth_kernel <= 1 or values.size <= 1:
+            return values
+        kernel = np.ones(self.smooth_kernel, dtype=np.float32) / self.smooth_kernel
+        pad_left = self.smooth_kernel // 2
+        pad_right = self.smooth_kernel - 1 - pad_left
+        padded = np.pad(values, (pad_left, pad_right), mode='edge')
+        return np.convolve(padded, kernel, mode='valid').astype(np.float32)
+
+    def _confidence(self, keypoint, keypoint_score=None):
+        """Estimate per-frame pose reliability."""
+
+        if keypoint_score is not None:
+            score = keypoint_score.astype(np.float32)
+            valid = score > self.eps
+            denom = np.maximum(valid.sum(axis=(0, 2)), 1)
+            return (score * valid).sum(axis=(0, 2)) / denom
+
+        coords = keypoint[..., :2].astype(np.float32)
+        valid = np.abs(coords).sum(axis=(-1, -2)) > self.eps
+        denom = np.maximum(valid.sum(axis=0), 1)
+        return valid.sum(axis=0).astype(np.float32) / denom
+
+    def _motion_signals(self, keypoint, keypoint_score=None):
+        """Compute confidence-weighted velocity and acceleration signals."""
+
+        total_frames = keypoint.shape[1]
+        coords = keypoint[..., :2].astype(np.float32)
+        confidence = self._confidence(keypoint, keypoint_score)
+
+        velocity = np.zeros(total_frames, dtype=np.float32)
+        acceleration = np.zeros(total_frames, dtype=np.float32)
+        if total_frames <= 1:
+            return velocity, acceleration, confidence
+
+        diffs = coords[:, 1:] - coords[:, :-1]
+        speed = np.linalg.norm(diffs, axis=-1)
+        if keypoint_score is not None:
+            pair_score = np.minimum(keypoint_score[:, 1:], keypoint_score[:, :-1]).astype(np.float32)
+            denom = np.maximum((pair_score > self.eps).sum(axis=(0, 2)), 1)
+            velocity[1:] = (speed * pair_score).sum(axis=(0, 2)) / denom
+        else:
+            valid_pair = np.abs(coords[:, 1:]).sum(axis=(-1, -2)) > self.eps
+            valid_pair &= np.abs(coords[:, :-1]).sum(axis=(-1, -2)) > self.eps
+            denom = np.maximum(valid_pair.sum(axis=0), 1)
+            velocity[1:] = (speed.sum(axis=2) * valid_pair).sum(axis=0) / denom
+
+        if total_frames > 2:
+            accel_vec = diffs[:, 1:] - diffs[:, :-1]
+            accel = np.linalg.norm(accel_vec, axis=-1)
+            if keypoint_score is not None:
+                triple_score = np.minimum.reduce((
+                    keypoint_score[:, 2:],
+                    keypoint_score[:, 1:-1],
+                    keypoint_score[:, :-2],
+                )).astype(np.float32)
+                denom = np.maximum((triple_score > self.eps).sum(axis=(0, 2)), 1)
+                acceleration[2:] = (accel * triple_score).sum(axis=(0, 2)) / denom
+            else:
+                valid_triple = np.abs(coords[:, 2:]).sum(axis=(-1, -2)) > self.eps
+                valid_triple &= np.abs(coords[:, 1:-1]).sum(axis=(-1, -2)) > self.eps
+                valid_triple &= np.abs(coords[:, :-2]).sum(axis=(-1, -2)) > self.eps
+                denom = np.maximum(valid_triple.sum(axis=0), 1)
+                acceleration[2:] = (accel.sum(axis=2) * valid_triple).sum(axis=0) / denom
+
+        velocity = self._smooth(self._robust_normalize(velocity) * confidence)
+        acceleration = self._smooth(self._robust_normalize(acceleration) * confidence)
+        return velocity, acceleration, confidence
+
+    def _segment_peak(self, signal, start, end):
+        """Find the strongest frame in a half-open segment."""
+
+        if end <= start:
+            return start
+        segment = signal[start:end]
+        if segment.size == 0 or not np.isfinite(segment).any() or np.nanmax(segment) <= 0:
+            return self._midpoint(start, end)
+        return start + int(np.nanargmax(segment))
+
+    def _fill_points(self, start, end, anchors, count):
+        """Fill remaining samples from the longest uncovered intervals."""
+
+        if count <= 0:
+            return []
+        if end <= start:
+            return [start] * count
+
+        points = []
+        occupied = sorted(set(int(x) for x in anchors if start <= int(x) < end))
+        intervals = []
+        cursor = start
+        for anchor in occupied:
+            intervals.append((cursor, anchor))
+            cursor = anchor + 1
+        intervals.append((cursor, end))
+        intervals = [(right - left, left, right) for left, right in intervals if right > left]
+        intervals.sort(reverse=True)
+        for _, left, right in intervals:
+            if len(points) >= count:
+                break
+            points.append(self._midpoint(left, right))
+
+        candidate = start
+        while len(points) < count:
+            if candidate not in occupied and candidate not in points and candidate < end:
+                points.append(candidate)
+            candidate += 1
+            if candidate >= end:
+                break
+        fallback = points[-1] if points else (occupied[-1] if occupied else self._midpoint(start, end))
+        while len(points) < count:
+            points.append(fallback)
+        return points
+
+    def _partition_points(self, start, end, velocity, acceleration):
+        """Select three KNS-v1 frames from one coarse partition."""
+
+        tv = self._segment_peak(velocity, start, end)
+        ta = self._segment_peak(acceleration, start, end)
+        if abs(tv - ta) <= self.merge_threshold:
+            center = int(round((tv + ta) / 2))
+            anchors = [min(max(center, start), max(start, end - 1))]
+        else:
+            anchors = [tv, ta]
+        anchors = sorted(set(anchors))
+        anchors.extend(self._fill_points(start, end, anchors, self.frames_per_partition - len(anchors)))
+        return sorted(anchors[:self.frames_per_partition]), tv, ta
+
+    def _get_kns_clip(self, keypoint, keypoint_score=None):
+        """Build one KNS-v1 clip and return indices plus diagnostics."""
+
+        total_frames = keypoint.shape[1]
+        velocity, acceleration, confidence = self._motion_signals(keypoint, keypoint_score)
+        num_partitions = self.clip_len // self.frames_per_partition
+        bounds = np.linspace(0, total_frames, num_partitions + 1).astype(int)
+        all_inds, peaks = [], []
+        for idx in range(num_partitions):
+            start = int(bounds[idx])
+            end = int(bounds[idx + 1])
+            if end <= start:
+                end = min(total_frames, start + 1)
+            points, tv, ta = self._partition_points(start, end, velocity, acceleration)
+            all_inds.extend(points)
+            peaks.append(dict(partition=idx, start=start, end=end, tv=int(tv), ta=int(ta)))
+        inds = np.array(sorted(all_inds), dtype=np.int64)
+        meta = dict(
+            sampler='KNS-v1',
+            velocity_peaks=[item['tv'] for item in peaks],
+            acceleration_peaks=[item['ta'] for item in peaks],
+            mean_confidence=float(np.mean(confidence)) if confidence.size else 0.0,
+            global_video_length=int(total_frames),
+            partition_peaks=peaks,
+        )
+        return inds, meta
+
+    def __call__(self, results):
+        if 'keypoint' not in results:
+            return super().__call__(results)
+
+        total_frames = results['total_frames']
+        allinds, metas = [], []
+        if self.uniform_clips:
+            old_num_clips = self.num_clips
+            self.num_clips = self.uniform_clips
+            uniform = self._get_test_clips(total_frames, self.clip_len)
+            self.num_clips = old_num_clips
+            allinds.append(uniform)
+            metas.extend(dict(sampler='uniform') for _ in range(self.uniform_clips))
+
+        for _ in range(self.num_clips):
+            inds, meta = self._get_kns_clip(results['keypoint'], results.get('keypoint_score'))
+            allinds.append(inds)
+            metas.append(meta)
+
+        inds = np.concatenate(allinds)
+        inds = np.mod(inds, total_frames)
+        start_index = results['start_index']
+        results['frame_inds'] = (inds + start_index).astype(int)
+        results['clip_len'] = self.clip_len
+        results['frame_interval'] = None
+        results['num_clips'] = self.uniform_clips + self.num_clips
+        results['kns_meta'] = metas
+        return results
+
+    def __repr__(self):
+        repr_str = (f'{self.__class__.__name__}('
+                    f'clip_len={self.clip_len}, '
+                    f'num_clips={self.num_clips}, '
+                    f'uniform_clips={self.uniform_clips}, '
+                    f'frames_per_partition={self.frames_per_partition}, '
+                    f'merge_threshold={self.merge_threshold}, '
+                    f'seed={self.seed})')
+        return repr_str
+
+
+@PIPELINES.register_module()
 class MotionAwareUniformSampleFrames(UniformSampleFrames):
     """Uniform sampler that biases training clips toward high-motion windows.
 
