@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers-per-gpu", type=int, default=None, help="Override test dataloader workers.")
     parser.add_argument("--max-batches", type=int, default=None, help="Limit batches for smoke or throughput checks.")
     parser.add_argument("--skip-eval", action="store_true", help="Dump scores without metric evaluation.")
+    parser.add_argument(
+        "--average-clips",
+        choices=["config", "prob", "score", "none"],
+        default="config",
+        help="Override model.test_cfg.average_clips. Use 'none' to dump per-clip scores.",
+    )
     return parser.parse_args()
 
 
@@ -52,6 +58,10 @@ def main() -> int:
         cfg.data.test_dataloader.videos_per_gpu = args.videos_per_gpu
     if args.workers_per_gpu is not None:
         cfg.data.test_dataloader.workers_per_gpu = args.workers_per_gpu
+    if args.average_clips != "config":
+        average_clips = None if args.average_clips == "none" else args.average_clips
+        cfg.model.setdefault("test_cfg", {})
+        cfg.model.test_cfg.average_clips = average_clips
     checkpoint = resolve_checkpoint(args.checkpoint, cfg)
     if checkpoint is None:
         raise ValueError("A checkpoint is required. Pass --checkpoint or set load_from in the config.")

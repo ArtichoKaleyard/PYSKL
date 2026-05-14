@@ -193,6 +193,108 @@ NTU60 上 E2-v2 明显低于 E2-v1，E4-v2 也低于 E3 和 E4-v1。这个轻量
 失败样本诊断：确认峰值是否被局部抖动、动作方向相反样本或短片段重复采样误导。
 若继续设计 v3，应优先考虑门控或置信度/峰值质量过滤，而不是再增加无约束峰值视图。
 
+## 2026-05-14 10-Clip Offset Analysis
+
+本节研究 10-clip uniform 中哪些时间 offset 真的有用。实现上通过
+`tools/modern/test.py --average-clips none` 导出未平均的 per-view logits，再由
+`tools/modern/analyze_clip_offsets.py` 复原每个时间 offset 的贡献。
+
+注意：PoseC3D 测试 pipeline 使用 `GeneratePoseTarget(double=True)`，因此原始导出
+不是 10 个 view，而是 20 个 view：10 个时间 offset 加对应的水平翻转 view。
+分析脚本先对同一时间 offset 的两个 view 做概率平均，再比较时间 offset 子集。
+两个数据集上，脚本重算的 all-offset 指标与既有 10-clip score 完全一致。
+同时导出按时间 offset 聚合后的 score，形状分别为 NTU60 `(16487, 10, 60)`、
+FineGYM `(8521, 10, 99)`；对应 metadata 保存 `sample_id`、`label`、`offset_id`
+和每个 offset 的 `frame_inds`。
+
+### NTU60 Offset Metrics
+
+| offset | mean center | top-1 | mean class | fixes vs E1 | breaks vs E1 | E5 gain coverage |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.491 | 0.9358 | 0.9357 | 9 | 9 | 0.0435 |
+| 1 | 0.499 | 0.9348 | 0.9347 | 129 | 146 | 0.7043 |
+| 2 | 0.500 | 0.9359 | 0.9358 | 140 | 138 | 0.8261 |
+| 3 | 0.499 | 0.9363 | 0.9361 | 156 | 149 | 0.8783 |
+| 4 | 0.492 | 0.9369 | 0.9368 | 156 | 138 | 0.8261 |
+| 5 | 0.506 | 0.9359 | 0.9358 | 136 | 135 | 0.7391 |
+| 6 | 0.500 | 0.9333 | 0.9332 | 115 | 157 | 0.6348 |
+| 7 | 0.490 | 0.9367 | 0.9366 | 156 | 142 | 0.7913 |
+| 8 | 0.490 | 0.9359 | 0.9358 | 139 | 138 | 0.7565 |
+| 9 | 0.502 | 0.9359 | 0.9358 | 160 | 159 | 0.7913 |
+
+| cost | best offsets | top-1 | mean class |
+| ---: | --- | ---: | ---: |
+| 1 | `[4]` | 0.9369 | 0.9368 |
+| 2 | `[4, 8]` | 0.9377 | 0.9376 |
+| 3 | `[2, 4, 7]` | 0.9381 | 0.9380 |
+| 4 | `[2, 4, 5, 7]` | 0.9384 | 0.9383 |
+| 5 | `[2, 3, 4, 7, 8]` | 0.9386 | 0.9385 |
+| 10 | `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]` | 0.9373 | 0.9372 |
+
+Greedy selection 按 top-1 逐步加入 offset：
+
+| cost | greedy offsets | top-1 | mean class |
+| ---: | --- | ---: | ---: |
+| 1 | `[4]` | 0.9369 | 0.9368 |
+| 2 | `[4, 8]` | 0.9377 | 0.9376 |
+| 3 | `[4, 8, 0]` | 0.9381 | 0.9380 |
+| 4 | `[4, 8, 0, 5]` | 0.9381 | 0.9380 |
+| 5 | `[4, 8, 0, 5, 9]` | 0.9379 | 0.9378 |
+| 10 | `[4, 8, 0, 5, 9, 2, 7, 3, 1, 6]` | 0.9373 | 0.9372 |
+
+NTU60 上并不是所有 offset 都提供正收益。单 offset 最好的是 offset 4，已经接近
+10-clip；最佳 5-offset 子集 `[2, 3, 4, 7, 8]` 反而比完整 10-clip 高约
+0.13 个 top-1 百分点。leave-one-out 也显示 offset 6 最可疑：移除 offset 6 后
+top-1 提高约 0.055 个百分点。
+
+### FineGYM Offset Metrics
+
+| offset | mean center | top-1 | mean class | fixes vs F1 | breaks vs F1 | F5 gain coverage |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.464 | 0.9519 | 0.9295 | 9 | 5 | 0.0617 |
+| 1 | 0.479 | 0.9509 | 0.9284 | 67 | 71 | 0.6049 |
+| 2 | 0.492 | 0.9518 | 0.9318 | 83 | 80 | 0.7778 |
+| 3 | 0.503 | 0.9507 | 0.9299 | 84 | 90 | 0.7284 |
+| 4 | 0.508 | 0.9514 | 0.9302 | 86 | 86 | 0.7531 |
+| 5 | 0.517 | 0.9539 | 0.9341 | 93 | 72 | 0.7531 |
+| 6 | 0.517 | 0.9504 | 0.9300 | 80 | 89 | 0.6790 |
+| 7 | 0.508 | 0.9514 | 0.9311 | 87 | 87 | 0.7407 |
+| 8 | 0.500 | 0.9518 | 0.9309 | 87 | 84 | 0.7160 |
+| 9 | 0.493 | 0.9526 | 0.9330 | 75 | 65 | 0.6790 |
+
+| cost | best offsets | top-1 | mean class |
+| ---: | --- | ---: | ---: |
+| 1 | `[5]` | 0.9539 | 0.9341 |
+| 2 | `[7, 9]` | 0.9556 | 0.9376 |
+| 3 | `[5, 7, 9]` | 0.9575 | 0.9387 |
+| 4 | `[2, 3, 4, 9]` | 0.9578 | 0.9398 |
+| 5 | `[0, 2, 4, 8, 9]` | 0.9572 | 0.9395 |
+| 10 | `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]` | 0.9575 | 0.9381 |
+
+Greedy selection 按 mean class 逐步加入 offset：
+
+| cost | greedy offsets | top-1 | mean class |
+| ---: | --- | ---: | ---: |
+| 1 | `[5]` | 0.9539 | 0.9341 |
+| 2 | `[5, 8]` | 0.9562 | 0.9365 |
+| 3 | `[5, 8, 7]` | 0.9572 | 0.9381 |
+| 4 | `[5, 8, 7, 2]` | 0.9573 | 0.9386 |
+| 5 | `[5, 8, 7, 2, 6]` | 0.9575 | 0.9384 |
+| 10 | `[5, 8, 7, 2, 6, 3, 4, 9, 1, 0]` | 0.9575 | 0.9381 |
+
+FineGYM 上 offset 价值更集中。按 mean class，offset 5 单独就是最强单视图；
+最佳 4-offset 子集 `[2, 3, 4, 9]` 达到 0.9398 mean class，比完整 10-clip 高约
+0.17 个百分点。leave-one-out 中移除 offset 0 后 mean class 反而提升约 0.030
+个百分点，而移除 offset 2/4/9 会明显下降，说明 10-clip 内部存在可裁剪的弱视图。
+
+### Offset Decision
+
+这轮结果支持继续研究“10-clip 里的有效 offset 选择”，而不是再扩展 KNS-v1/v2。
+两个数据集都出现小子集优于完整 10-clip 的现象，且 FineGYM 的集中度更明显。
+下一步可以把固定子集作为低成本 test-time policy 验证，例如 NTU 的
+`[2, 3, 4, 7, 8]` 与 FineGYM 的 `[2, 3, 4, 9]`，再检查这些 offset 对
+E1/F1 fixes 和 breaks 的样本类别分布。
+
 ## Commands
 
 PoseC3D joint 和 limb 使用 `videos_per_gpu=2, workers_per_gpu=4`。最初的
@@ -244,6 +346,52 @@ uv run python tools/modern/fuse_scores.py \
   --out work_dirs/modern/scores/posec3d_joint_limb_fusion.json
 ```
 
+10-clip offset 分析先导出不做 clip 平均的 raw view logits，再运行分析脚本：
+
+```bash
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/ntu60_xsub_joint_10clip_uniform.py \
+  --out work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_clip.pkl \
+  --average-clips none \
+  --skip-eval \
+  --partial-out work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_clip.partial.pkl \
+  --partial-interval 100 \
+  --progress-interval 60 \
+  --videos-per-gpu 2 \
+  --workers-per-gpu 4
+
+uv run python tools/modern/analyze_clip_offsets.py \
+  --per-clip-score work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_clip.pkl \
+  --baseline-score work_dirs/modern/scores/posec3d_joint_e1_1clip_uniform.pkl \
+  --ten-clip-score work_dirs/modern/scores/posec3d_joint.pkl \
+  --metadata work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.sampling.pkl \
+  --primary-metric top1 \
+  --per-offset-score-out work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_offset.pkl \
+  --per-offset-metadata-out work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_offset.metadata.pkl \
+  --out work_dirs/modern/scores/posec3d_joint_10clip_offsets_analysis.json
+
+uv run python tools/modern/test.py \
+  configs/modern/posec3d/gym_joint_10clip_uniform.py \
+  --out work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_clip.pkl \
+  --average-clips none \
+  --skip-eval \
+  --partial-out work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_clip.partial.pkl \
+  --partial-interval 100 \
+  --progress-interval 60 \
+  --videos-per-gpu 2 \
+  --workers-per-gpu 4
+
+uv run python tools/modern/analyze_clip_offsets.py \
+  --per-clip-score work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_clip.pkl \
+  --baseline-score work_dirs/modern/scores/gym_joint_e1_1clip_uniform.pkl \
+  --ten-clip-score work_dirs/modern/scores/gym_joint_e5_10clip_uniform.pkl \
+  --metadata work_dirs/modern/scores/gym_joint_e5_10clip_uniform.sampling.pkl \
+  --primary-metric mean_class_accuracy \
+  --per-offset-score-out work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_offset.pkl \
+  --per-offset-metadata-out work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_offset.metadata.pkl \
+  --out work_dirs/modern/scores/gym_joint_10clip_offsets_analysis.json
+```
+
 ## Output Files
 
 | 产物 | 路径 |
@@ -266,6 +414,14 @@ uv run python tools/modern/fuse_scores.py \
 | FineGYM F4-v2 score | `work_dirs/modern/scores/gym_joint_e4_uniform_kns_v2.pkl` |
 | FineGYM F5 score | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.pkl` |
 | FineGYM analysis | `work_dirs/modern/scores/gym_joint_kns_analysis.json` |
+| NTU 10-clip per-view score | `work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_clip.pkl` |
+| NTU 10-clip per-offset score | `work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_offset.pkl` |
+| NTU 10-clip per-offset metadata | `work_dirs/modern/scores/posec3d_joint_e5_10clip_uniform.per_offset.metadata.pkl` |
+| NTU offset analysis | `work_dirs/modern/scores/posec3d_joint_10clip_offsets_analysis.json` |
+| FineGYM 10-clip per-view score | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_clip.pkl` |
+| FineGYM 10-clip per-offset score | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_offset.pkl` |
+| FineGYM 10-clip per-offset metadata | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_offset.metadata.pkl` |
+| FineGYM offset analysis | `work_dirs/modern/scores/gym_joint_10clip_offsets_analysis.json` |
 
 完整性检查结果：
 
@@ -281,10 +437,16 @@ uv run python tools/modern/fuse_scores.py \
 - `gym_joint_e4_uniform_kns.pkl`：8521 samples
 - `gym_joint_e4_uniform_kns_v2.pkl`：8521 samples
 - `gym_joint_e5_10clip_uniform.pkl`：8521 samples
+- `posec3d_joint_e5_10clip_uniform.per_clip.pkl`：16487 samples，first shape `(20, 60)`
+- `posec3d_joint_e5_10clip_uniform.per_offset.pkl`：shape `(16487, 10, 60)`
+- `posec3d_joint_e5_10clip_uniform.per_offset.metadata.pkl`：16487 samples，每条 10 offsets
+- `gym_joint_e5_10clip_uniform.per_clip.pkl`：8521 samples，first shape `(20, 99)`
+- `gym_joint_e5_10clip_uniform.per_offset.pkl`：shape `(8521, 10, 99)`
+- `gym_joint_e5_10clip_uniform.per_offset.metadata.pkl`：8521 samples，每条 10 offsets
 
 ## Notes
 
 - partial score 文件只用于长任务进度检查，最终指标以非 partial 的 score 和
   metrics 文件为准。
-- 本轮只验证官方权重测试、PoseC3D 分数融合和 E 组 test-time sampling；
-  F/G 与训练阶段采样实验尚未开始。
+- 本文档目前只覆盖官方权重测试、PoseC3D 分数融合、E/F 组 test-time sampling
+  和 10-clip offset 分析；训练阶段采样实验尚未开始。
