@@ -147,6 +147,110 @@ KNS-v1 每个粗分区最多保留速度峰值 `tv`、加速度峰值 `ta`，当
 经常正确、KNS-v1 错误。当前更合理的解释是：10-clip 收益主要来自 uniform 相位
 之间的互补，而不是速度/加速度峰值本身。
 
+## Skeleton Sampling Viewer
+
+`tools/modern/visualize_sampling.py` 可以把骨架序列、归一化速度/加速度/pose
+confidence 曲线、以及 E1/F1、E3/F3、KNS-v1、KNS-v2、10-clip offset 和最佳
+offset 子集采样条集中导出为一个静态 HTML。HTML 自包含数据和脚本，不依赖本地
+web server，适合逐样本拖动时间轴或按视频方式播放骨架运动。
+
+默认推荐样本会优先选择“分类正确性上有解释价值”的目标，而不是只按采样几何接近
+排序：
+
+1. 1-clip 错、10-clip 对、KNS-v1 错。
+2. 1-clip 错、最佳 offset 子集对、KNS-v1 错。
+3. 1-clip 错、10-clip 对。
+4. 1-clip 对、KNS-v1 错。
+5. 其他上下文样本。
+
+KNS 采样条会区分速度峰值、加速度峰值、合并峰值和 fill 帧，避免把全部 KNS
+采样帧都误读成峰值帧。推荐列表和 prediction card 同时显示 E1/F1、E5/F5、
+KNS-v1 与最佳 offset 子集的分类正确性，因此可以直接检查“采样位置接近”是否
+真的对应“分类被修复”。采样条的横坐标是原始时间轴上的真实 frame id；每行会显示
+`unique/total`，并标出该采样序列的起点和终点。对于 `total_frames < clip_len`
+的短序列，uniform offset 可能真实覆盖几乎所有帧并发生环绕，因此采样条会显得
+非常整齐；这种情况下应结合起点/终点和 `unique/total` 判断 offset 相位，而不是
+只看是否覆盖了哪些 frame id。页面高度会按视口和采样行数自适应：优先保证骨架区
+与采样条行高可读，空间不足时让页面滚动，而不是压薄采样条。可视区域采用稳定的
+模块流：骨架与预测卡位于上方预览区，曲线与采样条各自独立成块，避免动态高度导致
+不同 canvas 相互覆盖。所有 uniform offset 使用同一种蓝色，offset 编号只通过行名
+和起点/终点标记区分；颜色仅表达采样类型，避免把 offset id 误读成额外语义。同一行
+内重复采到同一 frame 时会先聚合计数，再按该行最大重复次数归一化颜色透明度；低频点
+仍保留可见的最低透明度，高频重复点颜色更实。若该行所有可见 frame 的采样次数相同，
+则不降低透明度，避免把均匀采样误读成低置信度或弱采样。
+
+## Offset Subset Temporal Weight Association
+
+本轮新增 `tools/modern/analyze_offset_weight_patterns.py`，只分析 10 个 uniform
+offset 的子集所诱导出的时间权重分布与分类收益之间的关联。不训练模型，不修改
+backbone，不把结果解释为新采样器。
+
+分析对 `m=1..4` 的 offset subset 做完整枚举，并为每个样本/子集构造原始帧权重：
+
+```text
+W_S[t] = frame t 在 subset S 中被采样的次数 / subset 总采样位数
+```
+
+同时计算 `N_eff = 1 / sum(W[t]^2)`、concentration、top-20% 高权重 cluster、
+`mean + alpha * std` 高权重 cluster、fix/break、subset 级 Spearman，以及样本级
+Spearman 分布。完整结果位于 `work_dirs/modern/offset_analysis/`。
+
+关键结论是：offset subset 确实形成了非均匀时间权重，但这种非均匀性与分类收益的
+关联很弱，而且 FineGYM 与 NTU60 不一致。
+
+| 数据集 | best subset | primary | mean concentration | mean N_eff | fixes | breaks | overlap with 10-clip |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| FineGYM | `[2, 3, 4, 9]` | 0.9398 mean class | 0.0009 | 43.09 | 87 | 33 | 0.9012 |
+| NTU60 | `[2, 4, 5, 7]` | 0.9384 top-1 | 0.0021 | 70.83 | 140 | 97 | 0.9130 |
+
+subset 级相关性没有给出稳定支持：
+
+| 数据集 | cost | corr(concentration, primary) | corr(N_eff, primary) | corr(cluster span, primary) | corr(largest mass, primary) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| FineGYM | 4 | 0.0209 | 0.0574 | -0.0915 | -0.0031 |
+| NTU60 | 4 | 0.1657 | -0.1350 | -0.3130 | -0.1530 |
+
+样本级也很弱：在同一样本的不同 offset subset 间，concentration 与 label score 的
+Spearman median 只有 FineGYM `0.0230`、NTU60 `0.0193`。这说明“更集中的时间权重
+带来更高正确类分数”不是一个稳定现象。
+
+fixes 与 breaks 的权重模式差异也很小。best subset 的 fix 样本 concentration
+均值只比 break 样本略高：FineGYM `0.00208 vs 0.00188`，NTU60
+`0.00257 vs 0.00244`。多峰覆盖在 best subset 中很常见，但它更像 offset 子集
+叠加后的自然结果，而不是足以解释分类收益的独立变量。
+
+KNS 对照进一步说明“集中”不是充分条件。在 `F10 且 KNS 错` 的样本上，KNS 反而比
+best subset 更集中：FineGYM concentration `0.0088 vs 0.0019`，NTU60
+`0.0105 vs 0.0026`。因此 KNS 失败不能简单归因于“不够集中”；更合理的解释仍是
+uniform offset 的相位互补和模型 test-time ensemble 效应，而不是速度/加速度峰值
+或单纯高权重 cluster。
+
+当前证据不足以支持继续从“时间权重聚类/集中度”角度直接设计新采样策略。若后续要
+继续，应把问题收窄为 label-free 的 offset phase selection 或 ensemble redundancy
+分析，而不是把 best subset 的权重深浅直接转成 KNS-v3。
+
+### A/B Split Stability
+
+为检验 best subset 是否稳定，按 `sample_id` 的 SHA1 hash 做 deterministic A/B
+拆分；拆分不使用 label 或 prediction。然后在每个 split 内独立选择 best subset，
+再比较 A-best、B-best 与 full-best 的重合。
+
+| 数据集 | cost | full-best | A-best | B-best | A/B Jaccard | full/A Jaccard | full/B Jaccard |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: |
+| FineGYM | 1 | `[5]` | `[5]` | `[9]` | 0.0000 | 1.0000 | 0.0000 |
+| FineGYM | 2 | `[7, 9]` | `[7, 9]` | `[6, 9]` | 0.3333 | 1.0000 | 0.3333 |
+| FineGYM | 3 | `[5, 7, 9]` | `[2, 4, 9]` | `[5, 6, 7]` | 0.0000 | 0.2000 | 0.5000 |
+| FineGYM | 4 | `[2, 3, 4, 9]` | `[2, 3, 4, 9]` | `[1, 2, 6, 9]` | 0.3333 | 1.0000 | 0.3333 |
+| NTU60 | 1 | `[4]` | `[4]` | `[4]` | 1.0000 | 1.0000 | 1.0000 |
+| NTU60 | 2 | `[4, 8]` | `[4, 5]` | `[4, 8]` | 0.3333 | 0.3333 | 1.0000 |
+| NTU60 | 3 | `[2, 4, 7]` | `[0, 8, 9]` | `[1, 4, 7]` | 0.0000 | 0.0000 | 0.5000 |
+| NTU60 | 4 | `[2, 4, 5, 7]` | `[2, 4, 5, 7]` | `[1, 2, 7, 8]` | 0.3333 | 1.0000 | 0.3333 |
+
+这个结果支持“best subset 不稳定”的判断。除了 NTU60 cost=1 这种单 offset 明显最强的
+情况，A/B 两半的 best subset 经常不同；FineGYM cost=3 和 NTU60 cost=3 的 A/B
+Jaccard 都是 0。full-best 常常更接近 A-best，而 B-best 另选了一组，这说明当前
+best subset 很可能带有验证集选择波动，不应被解释为稳定采样规律。
+
 ## Commands
 
 10-clip offset 分析先导出不做 clip 平均的 raw view logits，再运行分析脚本：
@@ -195,6 +299,49 @@ uv run python tools/modern/analyze_clip_offsets.py \
   --out work_dirs/modern/scores/gym_joint_10clip_offsets_analysis.json
 ```
 
+生成可视化分析器：
+
+```bash
+uv run python tools/modern/visualize_sampling.py \
+  --preset ntu \
+  --recommend-top-k 20 \
+  --out work_dirs/modern/analysis/ntu_sampling_viewer.html
+
+uv run python tools/modern/visualize_sampling.py \
+  --preset gym \
+  --recommend-top-k 20 \
+  --out work_dirs/modern/analysis/gym_sampling_viewer.html
+```
+
+也可以手动指定样本，便于复查某个修复或误伤样本：
+
+```bash
+uv run python tools/modern/visualize_sampling.py \
+  --preset ntu \
+  --sample-id S001C001P001R001A001 \
+  --out work_dirs/modern/analysis/ntu_sampling_viewer_case.html
+```
+
+运行 offset 子集时间权重关联性分析：
+
+```bash
+uv run python tools/modern/analyze_offset_weight_patterns.py \
+  --datasets finegym ntu60 \
+  --out-dir work_dirs/modern/offset_analysis \
+  --max-cost 4 \
+  --sample-csv
+```
+
+如果 sample-level CSV 已存在，只需要刷新 summary 和典型样本，可以避免重复写大文件：
+
+```bash
+uv run python tools/modern/analyze_offset_weight_patterns.py \
+  --datasets finegym ntu60 \
+  --out-dir work_dirs/modern/offset_analysis \
+  --max-cost 4 \
+  --no-sample-csv
+```
+
 ## Analysis Artifacts
 
 | 产物 | 路径 |
@@ -207,3 +354,11 @@ uv run python tools/modern/analyze_clip_offsets.py \
 | FineGYM 10-clip per-offset score | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_offset.pkl` |
 | FineGYM 10-clip per-offset metadata | `work_dirs/modern/scores/gym_joint_e5_10clip_uniform.per_offset.metadata.pkl` |
 | FineGYM offset analysis | `work_dirs/modern/scores/gym_joint_10clip_offsets_analysis.json` |
+| NTU sampling viewer | `work_dirs/modern/analysis/ntu_sampling_viewer.html` |
+| FineGYM sampling viewer | `work_dirs/modern/analysis/gym_sampling_viewer.html` |
+| Offset weight association summary | `work_dirs/modern/offset_analysis/summary.md` |
+| FineGYM offset subset metrics | `work_dirs/modern/offset_analysis/offset_subset_metrics_finegym.csv` |
+| NTU offset subset metrics | `work_dirs/modern/offset_analysis/offset_subset_metrics_ntu60.csv` |
+| FineGYM sample-level weight metrics | `work_dirs/modern/offset_analysis/sample_level_weight_metrics_finegym.csv` |
+| NTU sample-level weight metrics | `work_dirs/modern/offset_analysis/sample_level_weight_metrics_ntu60.csv` |
+| Offset weight typical samples | `work_dirs/modern/offset_analysis/typical_samples.json` |
